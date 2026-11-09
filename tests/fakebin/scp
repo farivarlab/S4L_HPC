@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Test stand-in for scp: "host:path" means a path on this machine.
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -o|-P|-i) shift 2 ;;
+        -*) shift ;;
+        *) break ;;
+    esac
+done
+[[ ${FAKE_SSH_DOWN:-0} == 1 ]] && { echo "ssh: connect to host testserver port 22: Connection timed out" >&2; exit 255; }
+src=${1#*:}; dst=${2#*:}
+[[ $1 == *:* ]] || src=$1
+[[ $2 == *:* ]] || dst=$2
+exec cp -- "$src" "$dst"

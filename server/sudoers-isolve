@@ -1,0 +1,4 @@
+# Installed as /etc/sudoers.d/isolve-run (mode 0440) by install.sh.
+# USER is replaced by install.sh with the shared account name.
+# Allows exactly one root command, with no password and no other privileges.
+USER ALL=(root) NOPASSWD: /usr/local/bin/isolve-run

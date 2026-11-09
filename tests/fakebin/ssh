@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Test stand-in for ssh: "the server" is this machine with HOME=$FAKE_SERVER_HOME.
+[[ ${FAKE_SSH_DOWN:-0} == 1 ]] && { echo "ssh: connect to host testserver port 22: Connection timed out" >&2; exit 255; }
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -o|-p|-i|-l) shift 2 ;;
+        -*) shift ;;
+        *) break ;;
+    esac
+done
+shift   # host
+export HOME=$FAKE_SERVER_HOME
+exec bash -c "$*"

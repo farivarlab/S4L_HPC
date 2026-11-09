@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Test stand-in for "sudo -n /usr/local/bin/isolve-run ...": runs the fake runner.
+[[ $1 == -n ]] && shift
+[[ $1 == /usr/local/bin/isolve-run ]] || { echo "sudo: unexpected command $1" >&2; exit 1; }
+shift
+exec "$FAKE_RUNNER" "$@"

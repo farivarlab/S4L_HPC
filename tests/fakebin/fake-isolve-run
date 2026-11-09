@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Behaves like isolve-run without docker. File-name keywords select behaviour:
+#   slow -> runs until cancelled; fail -> exit 3 with a license error;
+#   nooutput -> exit 0 but writes no output file.
+jobs=$HOME/sim4life_jobs
+if [[ $1 == --cancel ]]; then
+    id8=${2:0:8}
+    [[ -f $HOME/.pid_$id8 ]] || exit 4
+    kill -TERM "$(cat "$HOME/.pid_$id8")"; exit 0
+fi
+[[ $1 == --allow-gpu2 ]] && shift
+gpu=$1 file=$2
+stem=${file%.h5} base=${file%_Input.h5} id8=${file:0:8}
+rm -f "$jobs/$stem.done"
+echo "fake iSolve on GPU $gpu: $file" | tee "$jobs/$stem.log"
+rc=0
+if [[ $file == *slow* ]]; then
+    echo $$ > "$HOME/.pid_$id8"
+    trap 'echo cancelled | tee -a "$jobs/$stem.log"; echo 143 > "$jobs/$stem.done"; rm -f "$HOME/.pid_$id8"; exit 143' TERM
+    for _ in $(seq 1 60); do sleep 1 & wait $!; done
+elif [[ $file == *fail* ]]; then
+    echo "ERROR: license checkout failed for feature SOLVER" | tee -a "$jobs/$stem.log"; rc=3
+else
+    sleep 2
+    [[ $file == *nooutput* ]] || echo "results" > "$jobs/${base}_Output.h5"
+    echo "iSolve own log: finished successfully" > "$jobs/${base}_Output.log"
+fi
+echo $rc > "$jobs/$stem.done"
+exit $rc

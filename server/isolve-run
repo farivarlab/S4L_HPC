@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# isolve-run - run Sim4Life iSolve inside the isolve:9.6.2 container on one GPU.
+#
+# Installed root-owned, mode 0755, as /usr/local/bin/isolve-run and called as
+#     sudo isolve-run [--allow-gpu2] [--dry-run] <gpu> <uuid>_Input.h5
+#     sudo isolve-run [--dry-run] --cancel <uuid>_Input.h5
+#
+# The input file must already be in ~<SUDO_USER>/sim4life_jobs. Next to it this
+# script writes <stem>.log (stdout+stderr of iSolve) and <stem>.done (container
+# exit code; its existence means "finished"). --dry-run prints the docker
+# command instead of running it and needs neither root nor a GPU.
+#
+# Because this runs as root on behalf of a shared account, every argument is
+# validated and every file in the jobs folder is written with the privileges
+# of the calling user (setpriv), so a symlink planted there cannot be used to
+# overwrite root-owned files.
+
+set -u
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+umask 022
+
+IMAGE="isolve:9.6.2"
+ISOLVE_DIR="/usr/local/isolve-sim4life_9.6.2-24047_amd64"
+JOBS_SUBDIR="sim4life_jobs"
+
+die() {
+    local rc=$1
+    shift
+    echo "isolve-run: $*" >&2
+    exit "$rc"
+}
+
+usage() {
+    cat <<'USAGE'
+Usage: sudo isolve-run [--allow-gpu2] [--dry-run] <gpu> <uuid>_Input.h5
+       sudo isolve-run [--dry-run] --cancel <uuid>_Input.h5
+
+  <gpu>          single digit; GPU 2 (MIG enabled, unusable by CUDA) is
+                 refused unless --allow-gpu2 is given
+  <file>         base name only, must end in Input.h5, lives in ~/sim4life_jobs
+  --cancel       docker stop the container of that job
+  --dry-run      print the docker command instead of running it
+
+Exit codes: 2 bad arguments/environment, 3 job already running,
+            4 --cancel found no running container, otherwise the container's.
+USAGE
+}
+
+dry_run=0
+allow_gpu2=0
+cancel=0
+args=()
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --dry-run)    dry_run=1 ;;
+        --allow-gpu2) allow_gpu2=1 ;;
+        --cancel)     cancel=1 ;;
+        -h|--help)    usage; exit 0 ;;
+        --)           shift; args+=("$@"); break ;;
+        -*)           die 2 "unknown option: $1 (see --help)" ;;
+        *)            args+=("$1") ;;
+    esac
+    shift
+done
+
+if (( cancel )); then
+    (( ${#args[@]} == 1 )) || { usage >&2; exit 2; }
+    gpu=""
+    file=${args[0]}
+else
+    (( ${#args[@]} == 2 )) || { usage >&2; exit 2; }
+    gpu=${args[0]}
+    file=${args[1]}
+    [[ $gpu =~ ^[0-9]$ ]] || die 2 "GPU must be a single digit, got '$gpu'"
+    if [[ $gpu == 2 ]] && (( ! allow_gpu2 )); then
+        die 2 "GPU 2 has MIG enabled with no instances, CUDA cannot use it; use GPU 0 or 1 (or pass --allow-gpu2)"
+    fi
+fi
+
+[[ $file != */* && $file != *\\* ]] || die 2 "give the file base name only, no directory: '$file'"
+[[ $file =~ ^[A-Za-z0-9][A-Za-z0-9._-]*Input\.h5$ ]] \
+    || die 2 "input file must end in Input.h5 (letters, digits, . _ - only): '$file'"
+
+# Calling user: sudo sets SUDO_USER itself, so it cannot be spoofed by the caller.
+user=${SUDO_USER:-}
+if [[ -z $user ]] && (( dry_run )); then
+    user=$(id -un)
+fi
+[[ -n $user ]] || die 2 "SUDO_USER is not set; run this through sudo"
+if [[ $user == root ]] && (( ! dry_run )); then
+    die 2 "refusing to run jobs as root; call it through sudo from a normal user"
+fi
+pw=$(getent passwd "$user") || die 2 "unknown user '$user'"
+IFS=: read -r _ _ uid gid _ home _ <<<"$pw"
+jobs="$home/$JOBS_SUBDIR"
+
+stem=${file%.h5}                  # <uuid>_Input
+base=${file%Input.h5}             # <uuid>_
+base=${base%_}                    # <uuid>
+id8=${base:0:8}
+id8=${id8//[^A-Za-z0-9]/_}
+cname="s4l_${id8}"
+log="$jobs/$stem.log"
+done_file="$jobs/$stem.done"
+
+if (( cancel )); then
+    if (( dry_run )); then
+        echo "docker stop $cname"
+        exit 0
+    fi
+    [[ $EUID -eq 0 ]] || die 2 "must be run as root (through sudo)"
+    if [[ -n $(docker ps -q --filter "name=^${cname}\$") ]]; then
+        exec docker stop "$cname"
+    fi
+    echo "isolve-run: no running container named $cname" >&2
+    exit 4
+fi
+
+cmd=(docker run --rm --gpus "device=$gpu" --network host --user "$uid:$gid"
+     -v "$ISOLVE_DIR:/opt/isolve:ro" -v "$jobs:/jobs" -w /jobs
+     --name "$cname" "$IMAGE" "/jobs/$file")
+
+if (( dry_run )); then
+    echo "${cmd[*]}"
+    exit 0
+fi
+
+[[ $EUID -eq 0 ]] || die 2 "must be run as root (through sudo)"
+[[ -d $ISOLVE_DIR/bin ]] || die 2 "solver directory not found: $ISOLVE_DIR"
+[[ -f $jobs/$file ]] || die 2 "input file not found: $jobs/$file"
+if [[ -n $(docker ps -q --filter "name=^${cname}\$") ]]; then
+    die 3 "container $cname is already running"
+fi
+
+as_user() { setpriv --reuid="$uid" --regid="$gid" --clear-groups "$@"; }
+
+as_user rm -f -- "$done_file"
+as_user bash -c ': > "$1"' _ "$log"
+
+"${cmd[@]}" 2>&1 | as_user tee -- "$log"
+rc=${PIPESTATUS[0]}       # container exit code, not tee's
+
+printf '%s\n' "$rc" | as_user tee -- "$done_file" >/dev/null
+exit "$rc"
